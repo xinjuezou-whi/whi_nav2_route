@@ -28,6 +28,10 @@ RouteServer::RouteServer(const rclcpp::NodeOptions & options)
 nav2_util::CallbackReturn
 RouteServer::on_configure(const rclcpp_lifecycle::State & /*state*/)
 {
+	/// node version and copyright announcement
+	std::cout << "\nWHI route server VERSION 00.01.1" << std::endl;
+	std::cout << "Copyright © 2026-2027 Wheel Hub Intelligent Co.,Ltd. All rights reserved\n" << std::endl;
+
   RCLCPP_INFO(get_logger(), "Configuring");
 
   tf_ = std::make_shared<tf2_ros::Buffer>(get_clock());
@@ -255,12 +259,13 @@ nav2_route::Route RouteServer::findRoute(
       rerouting_info.blocked_ids.push_back(route.edges.front()->start->nodeid);
       rerouting_info.blocked_ids.push_back(route.edges.front()->edgeid);
 
-      unsigned int inserted_id = 0;
-      auto virtual_graph = goal_intent_extractor_->createVirtualGraph(route.edges.front()->end->nodeid, x, y, inserted_id);
+      unsigned int inserted_index = 0;
+      auto virtual_graph = goal_intent_extractor_->createVirtualGraph(route.edges.front()->end->nodeid, x, y, inserted_index);
       if (virtual_graph != nullptr)
       {
+        route_request.start_nodeid = inserted_index;
         route = route_planner_->findRoute(
-          *virtual_graph, inserted_id, end_route, rerouting_info.blocked_ids, route_request);
+          *virtual_graph, inserted_index, end_route, rerouting_info.blocked_ids, route_request);
       }
     }
   }

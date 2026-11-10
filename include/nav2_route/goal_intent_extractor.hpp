@@ -138,9 +138,12 @@ public:
   /**
    * @brief create the virtual graph with virtual start id
    * @param FollowingId the followed one to virtual start id
+   * @param X the pose x to create node
+   * @param Y the pose x to create node
+   * @param InsertedIndex the index of inserted node
    * @return Succeed flag of creation
    */
-  Graph* createVirtualGraph(unsigned int FollowedId, double X, double Y, unsigned int& InsertedId);
+  Graph* createVirtualGraph(unsigned int FollowedId, double X, double Y, unsigned int& InsertedIndex);
 
 protected:
   /**
