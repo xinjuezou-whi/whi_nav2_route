@@ -32,7 +32,6 @@ void GoalIntentExtractor::configure(
   std::shared_ptr<tf2_ros::Buffer> tf,
   std::shared_ptr<nav2_costmap_2d::CostmapSubscriber> costmap_subscriber,
   const std::string & route_frame,
-  const std::string & global_frame,
   const std::string & base_frame)
 {
   logger_ = node->get_logger();
@@ -41,7 +40,6 @@ void GoalIntentExtractor::configure(
   tf_ = tf;
   costmap_subscriber_ = costmap_subscriber;
   route_frame_ = route_frame;
-  global_frame_ = global_frame;
   base_frame_ = base_frame;
   node_spatial_tree_ = std::make_shared<NodeSpatialTree>();
   node_spatial_tree_->computeTree(graph);
@@ -159,7 +157,7 @@ GoalIntentExtractor::findStartandGoal(const std::shared_ptr<const GoalT> goal)
   if (enable_search) {
     try {
       costmap = costmap_subscriber_->getCostmap();
-      costmap_frame_id = global_frame_;
+      costmap_frame_id = costmap_subscriber_->getFrameID();
     } catch (const std::exception & ex) {
       enable_search = false;
       RCLCPP_WARN(
@@ -185,7 +183,7 @@ GoalIntentExtractor::findStartandGoal(const std::shared_ptr<const GoalT> goal)
     auto transformed_start = transformPose(start_, costmap_frame_id);
     GoalIntentSearch::LoSCollisionChecker los_checker(costmap);
     if (los_checker.worldToMap(
-        candidate_nodes.front().pose.position, transformed_start.pose.position))
+      candidate_nodes.front().pose.position, transformed_start.pose.position))
     {
       if (los_checker.isInCollision()) {
         GoalIntentSearch::BreadthFirstSearch bfs(costmap);
@@ -212,7 +210,7 @@ GoalIntentExtractor::findStartandGoal(const std::shared_ptr<const GoalT> goal)
     auto transformed_end = transformPose(goal_, costmap_frame_id);
     GoalIntentSearch::LoSCollisionChecker los_checker(costmap);
     if (los_checker.worldToMap(
-        candidate_nodes.front().pose.position, transformed_end.pose.position))
+      candidate_nodes.front().pose.position, transformed_end.pose.position))
     {
       if (los_checker.isInCollision()) {
         GoalIntentSearch::BreadthFirstSearch bfs(costmap);
@@ -308,7 +306,7 @@ bool GoalIntentExtractor::findExitPoseIfBlocked(unsigned int StartId, unsigned i
   try
   {
     costmap = costmap_subscriber_->getCostmap();
-    costmap_frame_id = global_frame_;
+    costmap_frame_id = costmap_subscriber_->getFrameID();
   }
   catch (const std::exception& ex)
   {
@@ -347,7 +345,7 @@ bool GoalIntentExtractor::findExitPoseIfBlocked(unsigned int StartId, unsigned i
   return false;
 }
 
-Graph* GoalIntentExtractor::createVirtualGraph(unsigned int FollowedId, double X, double Y, unsigned int& InsertedId)
+Graph* GoalIntentExtractor::createVirtualGraph(unsigned int FollowedId, double X, double Y, unsigned int& InsertedIndex)
 {
   // Basic graph validation.
   if (graph_ == nullptr || graph_->empty() || id_to_graph_map_ == nullptr || id_to_graph_map_->empty())
@@ -362,26 +360,91 @@ Graph* GoalIntentExtractor::createVirtualGraph(unsigned int FollowedId, double X
     return nullptr;
   }
 
-  InsertedId = 0;
+  unsigned int InsertedId = 0;
   if (generateVirtualId(InsertedId))
   {
     id_to_graph_map_virtual_.clear();
     graph_virtual_.clear();
 
-    id_to_graph_map_virtual_ = *id_to_graph_map_;
-    id_to_graph_map_virtual_[InsertedId] = id_to_graph_map_->size();
+    const auto followed_it = id_to_graph_map_->find(FollowedId);
+    if (followed_it == id_to_graph_map_->end())
+    {
+        throw std::runtime_error("FollowedId does not exist in original graph");
+    }
 
+    const size_t followed_index = followed_it->second;
+    if (followed_index >= graph_->size())
+    {
+        throw std::runtime_error("FollowedId has an invalid graph index");
+    }
+
+    // Copy the original graph and ID mapping
     graph_virtual_ = *graph_;
-    // add node
-    graph_virtual_.push_back(Node());
-    graph_virtual_.back().nodeid = InsertedId;
-    graph_virtual_.back().coords.frame_id = graph_->front().coords.frame_id;
-    graph_virtual_.back().coords.x = X;
-    graph_virtual_.back().coords.y = Y;
-    // add edge
-    EdgeCost edge_cost;
-    graph_virtual_.back().addEdge(edge_cost, &graph_virtual_[id_to_graph_map_virtual_[FollowedId]], InsertedId);
+    id_to_graph_map_virtual_ = *id_to_graph_map_;
+    // Append the new node
+    Node inserted_node;
+    inserted_node.nodeid = InsertedId;
+    inserted_node.coords.frame_id = graph_->front().coords.frame_id;
+    inserted_node.coords.x = X;
+    inserted_node.coords.y = Y;
 
+    // Record its index before insertion
+    InsertedIndex = graph_virtual_.size();
+    graph_virtual_.push_back(std::move(inserted_node));
+
+    // Update ID-to-index mapping
+    id_to_graph_map_virtual_[InsertedId] = InsertedIndex;
+
+    // Remap existing edge pointers
+    //
+    // The original graph copy is shallow with respect to
+    // DirectionalEdge::start and DirectionalEdge::end.
+    // Remap them to the corresponding nodes in graph_virtual_.
+
+    std::unordered_map<const Node*, Node*> node_ptr_map;
+    node_ptr_map.reserve(graph_->size());
+    for (size_t i = 0; i < graph_->size(); ++i)
+    {
+        node_ptr_map.emplace(&(*graph_)[i], &graph_virtual_[i]);
+    }
+
+    for (auto& node : graph_virtual_)
+    {
+        for (auto& edge : node.neighbors)
+        {
+            if (edge.start)
+            {
+                const auto it = node_ptr_map.find(edge.start);
+                if (it == node_ptr_map.end())
+                {
+                    throw std::runtime_error("Existing edge start pointer "
+                        "does not belong to original graph");
+                }
+
+                edge.start = it->second;
+            }
+
+            if (edge.end)
+            {
+                const auto it = node_ptr_map.find(edge.end);
+                if (it == node_ptr_map.end())
+                {
+                    throw std::runtime_error("Existing edge end pointer "
+                        "does not belong to original graph");
+                }
+
+                edge.end = it->second;
+            }
+        }
+    }
+
+    // Add the one-way edge:
+    // InsertedNode ---> FollowedNode
+    EdgeCost edge_cost;
+    graph_virtual_[InsertedIndex].addEdge(edge_cost,
+        &graph_virtual_[followed_index], InsertedId);
+
+    // Rebuild virtual spatial tree
     node_spatial_tree_virtual_ = std::make_shared<NodeSpatialTree>();
     node_spatial_tree_virtual_->computeTree(graph_virtual_);
     node_spatial_tree_virtual_->setNumOfNearestNodes(num_of_nearest_nodes_);
@@ -425,6 +488,7 @@ bool GoalIntentExtractor::generateVirtualId(unsigned int& VirtualId, unsigned in
 
     if (id == max_id)
     {
+      VirtualId = id;
       break; // Avoid unsigned integer overflow.
     }
   }

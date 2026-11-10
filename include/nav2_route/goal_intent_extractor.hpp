@@ -65,13 +65,12 @@ public:
    * @param base_frame Robot reference frame
    */
   void configure(
-    rclcpp_lifecycle::LifecycleNode::SharedPtr node,
+    nav2_util::LifecycleNode::SharedPtr node,
     Graph & graph,
     GraphToIDMap * id_to_graph_map,
     std::shared_ptr<tf2_ros::Buffer> tf,
     std::shared_ptr<nav2_costmap_2d::CostmapSubscriber> costmap_subscriber,
     const std::string & route_frame,
-    const std::string & global_frame,
     const std::string & base_frame);
 
   /**
@@ -138,9 +137,12 @@ public:
   /**
    * @brief create the virtual graph with virtual start id
    * @param FollowingId the followed one to virtual start id
+   * @param X the pose x to create node
+   * @param Y the pose x to create node
+   * @param InsertedIndex the index of inserted node
    * @return Succeed flag of creation
    */
-  Graph* createVirtualGraph(unsigned int FollowedId, double X, double Y, unsigned int& InsertedId);
+  Graph* createVirtualGraph(unsigned int FollowedId, double X, double Y, unsigned int& InsertedIndex);
 
 protected:
   /**
@@ -163,7 +165,6 @@ protected:
   std::shared_ptr<tf2_ros::Buffer> tf_;
   std::shared_ptr<nav2_costmap_2d::CostmapSubscriber> costmap_subscriber_;
   std::string route_frame_;
-  std::string global_frame_;
   std::string base_frame_;
   geometry_msgs::msg::PoseStamped start_, goal_;
   bool prune_goal_, enable_search_;

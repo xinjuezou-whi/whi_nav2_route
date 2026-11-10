@@ -28,6 +28,10 @@ RouteServer::RouteServer(const rclcpp::NodeOptions & options)
 nav2_util::CallbackReturn
 RouteServer::on_configure(const rclcpp_lifecycle::State & /*state*/)
 {
+  /// node version and copyright announcement
+  std::cout << "\nWHI route server VERSION 00.01.1" << std::endl;
+  std::cout << "Copyright ? 2026-2027 Wheel Hub Intelligent Co.,Ltd. All rights reserved\n" << std::endl;
+
   RCLCPP_INFO(get_logger(), "Configuring");
 
   tf_ = std::make_shared<tf2_ros::Buffer>(get_clock());
@@ -35,7 +39,7 @@ RouteServer::on_configure(const rclcpp_lifecycle::State & /*state*/)
     get_node_base_interface(),
     get_node_timers_interface());
   tf_->setCreateTimerInterface(timer_interface);
-  transform_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_);
+  transform_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_, this, true);
 
   auto node = shared_from_this();
   graph_vis_publisher_ =
@@ -52,8 +56,10 @@ RouteServer::on_configure(const rclcpp_lifecycle::State & /*state*/)
     std::bind(&RouteServer::computeAndTrackRoute, this),
     nullptr, std::chrono::milliseconds(500), true);
 
-  set_graph_service_ = node->create_service<nav2_msgs::srv::SetRouteGraph>(
+  set_graph_service_ = std::make_shared<nav2_util::ServiceServer<nav2_msgs::srv::SetRouteGraph,
+      std::shared_ptr<rclcpp_lifecycle::LifecycleNode>>>(
     std::string(node->get_name()) + "/set_route_graph",
+    node,
     std::bind(
       &RouteServer::setRouteGraph, this,
       std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
@@ -61,14 +67,11 @@ RouteServer::on_configure(const rclcpp_lifecycle::State & /*state*/)
   declare_parameter_if_not_declared(
     node, "route_frame", rclcpp::ParameterValue(std::string("map")));
   declare_parameter_if_not_declared(
-    node, "global_frame", rclcpp::ParameterValue(std::string("map")));
-  declare_parameter_if_not_declared(
     node, "base_frame", rclcpp::ParameterValue(std::string("base_link")));
   declare_parameter_if_not_declared(
     node, "max_planning_time", rclcpp::ParameterValue(2.0));
 
   route_frame_ = node->get_parameter("route_frame").as_string();
-  global_frame_ = node->get_parameter("global_frame").as_string();
   base_frame_ = node->get_parameter("base_frame").as_string();
   max_planning_time_ = node->get_parameter("max_planning_time").as_double();
 
@@ -87,8 +90,7 @@ RouteServer::on_configure(const rclcpp_lifecycle::State & /*state*/)
 
     goal_intent_extractor_ = std::make_shared<nav2_route::GoalIntentExtractor>();
     goal_intent_extractor_->configure(
-      node, graph_, &id_to_graph_map_, tf_, costmap_subscriber_, route_frame_,
-      global_frame_, base_frame_);
+      node, graph_, &id_to_graph_map_, tf_, costmap_subscriber_, route_frame_, base_frame_);
 
     route_planner_ = std::make_shared<nav2_route::RoutePlanner>();
     route_planner_->configure(node, tf_, costmap_subscriber_);
@@ -255,12 +257,13 @@ nav2_route::Route RouteServer::findRoute(
       rerouting_info.blocked_ids.push_back(route.edges.front()->start->nodeid);
       rerouting_info.blocked_ids.push_back(route.edges.front()->edgeid);
 
-      unsigned int inserted_id = 0;
-      auto virtual_graph = goal_intent_extractor_->createVirtualGraph(route.edges.front()->end->nodeid, x, y, inserted_id);
+      unsigned int inserted_index = 0;
+      auto virtual_graph = goal_intent_extractor_->createVirtualGraph(route.edges.front()->end->nodeid, x, y, inserted_index);
       if (virtual_graph != nullptr)
       {
+        route_request.start_nodeid = inserted_index;
         route = route_planner_->findRoute(
-          *virtual_graph, inserted_id, end_route, rerouting_info.blocked_ids, route_request);
+          *virtual_graph, inserted_index, end_route, rerouting_info.blocked_ids, route_request);
       }
     }
   }
@@ -280,7 +283,7 @@ RouteServer::processRouteRequest(
 
   try {
     while (rclcpp::ok()) {
-      if (!isRequestValid<ActionT>(action_server)) {
+      if (!isRequestValid(action_server)) {
         return;
       }
 
@@ -292,8 +295,7 @@ RouteServer::processRouteRequest(
 
       // Find the route
       nav2_route::Route route = findRoute(goal, rerouting_info);
-      RCLCPP_INFO(
-        get_logger(), "Route found with %zu nodes and %zu edges",
+      RCLCPP_INFO(get_logger(), "Route found with %zu nodes and %zu edges",
         route.edges.size() + 1u, route.edges.size());
       auto path = path_converter_->densify(route, rerouting_info, route_frame_, this->now());
 
@@ -320,32 +322,50 @@ RouteServer::processRouteRequest(
     }
   } catch (nav2_core::NoValidRouteCouldBeFound & ex) {
     exceptionWarning(goal, ex);
+    result->error_code = ActionT::Result::NO_VALID_ROUTE;
+    result->error_msg = ex.what();
     action_server->terminate_current(result);
   } catch (nav2_core::TimedOut & ex) {
     exceptionWarning(goal, ex);
+    result->error_code = ActionT::Result::TIMEOUT;
+    result->error_msg = ex.what();
     action_server->terminate_current(result);
   } catch (nav2_core::RouteTFError & ex) {
     exceptionWarning(goal, ex);
+    result->error_code = ActionT::Result::TF_ERROR;
+    result->error_msg = ex.what();
     action_server->terminate_current(result);
   } catch (nav2_core::NoValidGraph & ex) {
     exceptionWarning(goal, ex);
+    result->error_code = ActionT::Result::NO_VALID_GRAPH;
+    result->error_msg = ex.what();
     action_server->terminate_current(result);
   } catch (nav2_core::IndeterminantNodesOnGraph & ex) {
     exceptionWarning(goal, ex);
+    result->error_code = ActionT::Result::INDETERMINANT_NODES_ON_GRAPH;
+    result->error_msg = ex.what();
     action_server->terminate_current(result);
   } catch (nav2_core::InvalidEdgeScorerUse & ex) {
     exceptionWarning(goal, ex);
+    result->error_code = ActionT::Result::INVALID_EDGE_SCORER_USE;
+    result->error_msg = ex.what();
     action_server->terminate_current(result);
   } catch (nav2_core::OperationFailed & ex) {
     // A special case since Operation Failed is only in Compute & Track
     // actions, specifying it to allow otherwise fully shared code
     exceptionWarning(goal, ex);
+    result->error_code = ComputeAndTrackRoute::Result::OPERATION_FAILED;
+    result->error_msg = ex.what();
     action_server->terminate_current(result);
   } catch (nav2_core::RouteException & ex) {
     exceptionWarning(goal, ex);
+    result->error_code = ActionT::Result::UNKNOWN;
+    result->error_msg = ex.what();
     action_server->terminate_current(result);
   } catch (std::exception & ex) {
     exceptionWarning(goal, ex);
+    result->error_code = ActionT::Result::UNKNOWN;
+    result->error_msg = ex.what();
     action_server->terminate_current(result);
   }
 }
@@ -354,14 +374,14 @@ void
 RouteServer::computeRoute()
 {
   RCLCPP_INFO(get_logger(), "Computing route to goal.");
-  processRouteRequest<ComputeRoute>(compute_route_server_);
+  processRouteRequest(compute_route_server_);
 }
 
 void
 RouteServer::computeAndTrackRoute()
 {
   RCLCPP_INFO(get_logger(), "Computing and tracking route to goal.");
-  processRouteRequest<ComputeAndTrackRoute>(compute_and_track_route_server_);
+  processRouteRequest(compute_and_track_route_server_);
 }
 
 void RouteServer::setRouteGraph(
@@ -400,32 +420,7 @@ void RouteServer::exceptionWarning(
     goal->goal.pose.position.x, goal->goal.pose.position.y, goal->goal_id, ex.what());
 }
 
-// Explicit template instantiations
-template bool RouteServer::isRequestValid<RouteServer::ComputeRoute>(
-  std::shared_ptr<nav2_util::SimpleActionServer<RouteServer::ComputeRoute>> &);
-template bool RouteServer::isRequestValid<RouteServer::ComputeAndTrackRoute>(
-  std::shared_ptr<nav2_util::SimpleActionServer<RouteServer::ComputeAndTrackRoute>> &);
-
-template nav2_route::Route RouteServer::findRoute<RouteServer::ComputeRouteGoal>(
-  const std::shared_ptr<const RouteServer::ComputeRouteGoal>,
-  nav2_route::ReroutingState &);
-template nav2_route::Route RouteServer::findRoute<RouteServer::ComputeAndTrackRouteGoal>(
-  const std::shared_ptr<const RouteServer::ComputeAndTrackRouteGoal>,
-  nav2_route::ReroutingState &);
-
-template void RouteServer::processRouteRequest<RouteServer::ComputeRoute>(
-  std::shared_ptr<nav2_util::SimpleActionServer<RouteServer::ComputeRoute>> &);
-template void RouteServer::processRouteRequest<RouteServer::ComputeAndTrackRoute>(
-  std::shared_ptr<nav2_util::SimpleActionServer<RouteServer::ComputeAndTrackRoute>> &);
-
-template void RouteServer::exceptionWarning<RouteServer::ComputeRouteGoal>(
-  const std::shared_ptr<const RouteServer::ComputeRouteGoal>,
-  const std::exception &);
-template void RouteServer::exceptionWarning<RouteServer::ComputeAndTrackRouteGoal>(
-  const std::shared_ptr<const RouteServer::ComputeAndTrackRouteGoal>,
-  const std::exception &);
-
-}  // namespace whi_nav2_route
+}  // namespace nav2_route
 
 #include "rclcpp_components/register_node_macro.hpp"
 
