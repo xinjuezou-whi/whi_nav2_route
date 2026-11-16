@@ -135,14 +135,26 @@ public:
   bool findExitPoseIfBlocked(unsigned int StartId, unsigned int NextId, double& X, double& Y);
 
   /**
+   * @brief Check if there is collision between two nodes, and find the exit pose if so
+   * @param RouteEdges the edge vector of route
+   * @param X the exit pose X in world
+   * @param Y the exit pose Y in world
+   * @param ExitNodeid the exit node id on route
+   * @param ByPassedIds the bypassed node ids on route
+   * @return block flag
+   */
+  bool findExitPoseIfBlocked(const EdgePtrVector& RouteEdges, double& X, double& Y,
+    unsigned int& ExitNodeid, std::vector<unsigned int>& ByPassedIds);
+
+  /**
    * @brief create the virtual graph with virtual start id
-   * @param FollowingId the followed one to virtual start id
-   * @param X the pose x to create node
-   * @param Y the pose x to create node
+   * @param StartX the start pose x to create node
+   * @param StartY the start pose x to create node
+   * @param EndId the end id of the existed route
    * @param InsertedIndex the index of inserted node
    * @return Succeed flag of creation
    */
-  Graph* createVirtualGraph(unsigned int FollowedId, double X, double Y, unsigned int& InsertedIndex);
+  Graph* createVirtualGraph(double StartX, double StartY, unsigned int EndId, unsigned int& InsertedIndex);
 
 protected:
   /**

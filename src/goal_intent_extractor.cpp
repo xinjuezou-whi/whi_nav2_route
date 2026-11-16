@@ -317,14 +317,28 @@ bool GoalIntentExtractor::findExitPoseIfBlocked(unsigned int StartId, unsigned i
     return false;
   }
 
-  auto& start_data = graph_->at(StartId);
+  auto found_start = id_to_graph_map_->find(StartId);
+  if (found_start == id_to_graph_map_->end())
+  {
+    RCLCPP_WARN(logger_, "Failed to get the index from start node with id %d", StartId);
+    return false;
+  }
+  const size_t start_index = found_start->second;
+  auto& start_data = graph_->at(start_index);
   geometry_msgs::msg::PoseStamped start_pose;
   start_pose.pose.position.x = start_data.coords.x;
   start_pose.pose.position.y = start_data.coords.y;
   start_pose.header.frame_id = start_data.coords.frame_id;
   start_pose = transformPose(start_pose, costmap_frame_id);
 
-  auto& next_data = graph_->at(NextId);
+  auto found_next = id_to_graph_map_->find(NextId);
+  if (found_next == id_to_graph_map_->end())
+  {
+    RCLCPP_WARN(logger_, "Failed to get the index from next node with id %d", NextId);
+    return false;
+  }
+  const size_t next_index = found_next->second;
+  auto& next_data = graph_->at(next_index);
   geometry_msgs::msg::PoseStamped next_pose;
   next_pose.pose.position.x = next_data.coords.x;
   next_pose.pose.position.y = next_data.coords.y;
@@ -345,7 +359,104 @@ bool GoalIntentExtractor::findExitPoseIfBlocked(unsigned int StartId, unsigned i
   return false;
 }
 
-Graph* GoalIntentExtractor::createVirtualGraph(unsigned int FollowedId, double X, double Y, unsigned int& InsertedIndex)
+bool GoalIntentExtractor::findExitPoseIfBlocked(const EdgePtrVector& RouteEdges, double& X, double& Y,
+  unsigned int& ExitNodeid, std::vector<unsigned int>& ByPassedIds)
+{
+  std::shared_ptr<nav2_costmap_2d::Costmap2D> costmap = nullptr;
+  std::string costmap_frame_id;
+  try
+  {
+    costmap = costmap_subscriber_->getCostmap();
+    costmap_frame_id = costmap_subscriber_->getFrameID();
+  }
+  catch (const std::exception& ex)
+  {
+    RCLCPP_WARN(logger_,
+      "Failed to get costmap for goal intent extractor: %s. "
+      "Falling back to closest euclidean route node instead.", ex.what());
+
+    return false;
+  }
+
+  for (const auto& it : RouteEdges)
+  {
+    if (it->start)
+    {
+      auto found_start = id_to_graph_map_->find(it->start->nodeid);
+      if (found_start == id_to_graph_map_->end())
+      {
+        RCLCPP_WARN(logger_, "Failed to get the index from start node with id %d", it->start->nodeid);
+        return false;
+      }
+      const size_t start_index = found_start->second;
+      auto& start_data = graph_->at(start_index);
+      geometry_msgs::msg::PoseStamped start_pose;
+      start_pose.pose.position.x = start_data.coords.x;
+      start_pose.pose.position.y = start_data.coords.y;
+      start_pose.header.frame_id = start_data.coords.frame_id;
+      start_pose = transformPose(start_pose, costmap_frame_id);
+
+      geometry_msgs::msg::PoseStamped next_pose = start_pose;
+      if (it->end)
+      {
+        auto found_end = id_to_graph_map_->find(it->end->nodeid);
+        if (found_end == id_to_graph_map_->end())
+        {
+          RCLCPP_WARN(logger_, "Failed to get the index from end node with id %d", it->end->nodeid);
+          return false;
+        }
+        const size_t end_index = found_end->second;
+        auto& next_data = graph_->at(end_index);
+        next_pose.pose.position.x = next_data.coords.x;
+        next_pose.pose.position.y = next_data.coords.y;
+        next_pose.header.frame_id = next_data.coords.frame_id;
+        next_pose = transformPose(next_pose, costmap_frame_id);
+      }
+      else
+      {
+        RCLCPP_WARN(logger_, "Failed to find the exit pose on route");
+        return false;
+      }
+
+      GoalIntentSearch::LoSCollisionChecker los_checker(costmap);
+      if (los_checker.worldToMap(start_pose.pose.position, next_pose.pose.position))
+      {
+        if (los_checker.isInCollision())
+        {
+          if (los_checker.findCollisionExitPose(X, Y))
+          {
+            ExitNodeid = it->end->nodeid;
+            return true;
+          }
+          else
+          {
+            ByPassedIds.push_back(it->start->nodeid);
+          }          
+        }
+        else
+        {
+          // only consider the obstacle lays within the start edge of the route
+          return false;
+        }
+      }
+      else
+      {
+        RCLCPP_WARN(logger_, "Failed to transform poses %d and %d to map", it->start->nodeid, it->end->nodeid);
+        return false;
+      }
+    }
+    else
+    {
+      RCLCPP_WARN(logger_, "Failed to find the exit pose on route, since the route contains null edge");
+      return false;
+    }
+  }
+
+  RCLCPP_WARN(logger_, "Failed to find the exit pose on route");
+  return false;
+}
+
+Graph* GoalIntentExtractor::createVirtualGraph(double StartX, double StartY, unsigned int EndId, unsigned int& InsertedIndex)
 {
   // Basic graph validation.
   if (graph_ == nullptr || graph_->empty() || id_to_graph_map_ == nullptr || id_to_graph_map_->empty())
@@ -353,8 +464,8 @@ Graph* GoalIntentExtractor::createVirtualGraph(unsigned int FollowedId, double X
     return nullptr;
   }
 
-  // Check FollowedId exists.
-  auto found = id_to_graph_map_->find(FollowedId);
+  // Check EndId exists.
+  auto found = id_to_graph_map_->find(EndId);
   if (found == id_to_graph_map_->end())
   {
     return nullptr;
@@ -366,16 +477,16 @@ Graph* GoalIntentExtractor::createVirtualGraph(unsigned int FollowedId, double X
     id_to_graph_map_virtual_.clear();
     graph_virtual_.clear();
 
-    const auto followed_it = id_to_graph_map_->find(FollowedId);
+    const auto followed_it = id_to_graph_map_->find(EndId);
     if (followed_it == id_to_graph_map_->end())
     {
-        throw std::runtime_error("FollowedId does not exist in original graph");
+        throw std::runtime_error("EndId does not exist in original graph");
     }
 
     const size_t followed_index = followed_it->second;
     if (followed_index >= graph_->size())
     {
-        throw std::runtime_error("FollowedId has an invalid graph index");
+        throw std::runtime_error("EndId has an invalid graph index");
     }
 
     // Copy the original graph and ID mapping
@@ -385,8 +496,8 @@ Graph* GoalIntentExtractor::createVirtualGraph(unsigned int FollowedId, double X
     Node inserted_node;
     inserted_node.nodeid = InsertedId;
     inserted_node.coords.frame_id = graph_->front().coords.frame_id;
-    inserted_node.coords.x = X;
-    inserted_node.coords.y = Y;
+    inserted_node.coords.x = StartX;
+    inserted_node.coords.y = StartY;
 
     // Record its index before insertion
     InsertedIndex = graph_virtual_.size();

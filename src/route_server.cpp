@@ -29,7 +29,7 @@ nav2_util::CallbackReturn
 RouteServer::on_configure(const rclcpp_lifecycle::State & /*state*/)
 {
   /// node version and copyright announcement
-  std::cout << "\nWHI route server VERSION 00.01.1" << std::endl;
+  std::cout << "\nWHI route server VERSION 00.01.2" << std::endl;
   std::cout << "Copyright ? 2026-2027 Wheel Hub Intelligent Co.,Ltd. All rights reserved\n" << std::endl;
 
   RCLCPP_INFO(get_logger(), "Configuring");
@@ -250,15 +250,18 @@ nav2_route::Route RouteServer::findRoute(
       graph_, start_route, end_route, rerouting_info.blocked_ids, route_request);
 
     double x = 0.0, y = 0.0;
-    if (goal_intent_extractor_->findExitPoseIfBlocked(
-      route.edges.front()->start->nodeid, route.edges.front()->end->nodeid, x, y))
+    unsigned int exitNodeid;
+    std::vector<unsigned int> bypassedIds;
+    if (goal_intent_extractor_->findExitPoseIfBlocked(route.edges, x, y, exitNodeid, bypassedIds))
     {
       // set the ignore flag for the blocked edge 
-      rerouting_info.blocked_ids.push_back(route.edges.front()->start->nodeid);
-      rerouting_info.blocked_ids.push_back(route.edges.front()->edgeid);
+      for (const auto& bypassed : bypassedIds)
+      {
+        rerouting_info.blocked_ids.push_back(bypassed);
+      }
 
       unsigned int inserted_index = 0;
-      auto virtual_graph = goal_intent_extractor_->createVirtualGraph(route.edges.front()->end->nodeid, x, y, inserted_index);
+      auto virtual_graph = goal_intent_extractor_->createVirtualGraph(x, y, exitNodeid, inserted_index);
       if (virtual_graph != nullptr)
       {
         route_request.start_nodeid = inserted_index;
